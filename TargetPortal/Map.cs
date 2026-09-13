@@ -23,12 +23,25 @@ public static class Map
 	private static GameObject favoriteList = null!;
 	private static readonly List<FavoriteEntry> favorites = new();
 	private static int favoriteCycleIndex = -1;
+	private static bool drivingIconFilters;
 
 	private class FavoriteEntry
 	{
 		public Minimap.PinData Pin = null!;
 		public TextMeshProUGUI Label = null!;
 		public Color LabelColor;
+	}
+
+	// Minimap.ToggleIconFilter spawns a rumble sfx object per call, and Minimap.AddPin calls it for
+	// every pin added while that pin's icon type is filtered off. Both of those run in bulk here -
+	// once per icon type when the portal map opens, once per portal pin - so a single portal step
+	// spawns a pile of ZSFX objects that live for three seconds each. Enough of them at once exhaust
+	// Unity's 512 virtual voices and every later sound is dropped, the music track included. The sfx
+	// is feedback for a player toggling one filter by hand, so drop it while we drive them ourselves.
+	[HarmonyPatch(typeof(GamepadRumble), nameof(GamepadRumble.PlayGlobalSelectVibration))]
+	private static class SilenceFilterSfxWhileDrivingIcons
+	{
+		private static bool Prefix() => !drivingIconFilters;
 	}
 
 	[HarmonyPatch(typeof(TeleportWorldTrigger), nameof(TeleportWorldTrigger.OnTriggerEnter))]
@@ -78,11 +91,24 @@ public static class Map
 
 	private static void ToggleIconFilters(bool force = false)
 	{
-		if (visibleIconTypes == null)
+		if (visibleIconTypes is not { } savedIconTypes)
 		{
 			return;
 		}
 
+		drivingIconFilters = true;
+		try
+		{
+			ToggleIconFiltersInner(savedIconTypes, force);
+		}
+		finally
+		{
+			drivingIconFilters = false;
+		}
+	}
+
+	private static void ToggleIconFiltersInner(bool[] savedIconTypes, bool force)
+	{
 		HashSet<Sprite> locationSprites = new(Minimap.instance.m_locationIcons.Select(l => l.m_icon));
 		HashSet<int> visiblePins = new(Minimap.instance.m_pins.Where(p => locationSprites.Contains(p.m_icon)).Select(p => (int)p.m_type))
 		{
@@ -95,14 +121,14 @@ public static class Map
 		}
 
 
-		for (int i = 0; i < visibleIconTypes.Length; ++i)
+		for (int i = 0; i < savedIconTypes.Length; ++i)
 		{
 			if (visiblePins.Contains(i))
 			{
 				continue;
 			}
 
-			if (visibleIconTypes[i] && (!Minimap.instance.m_visibleIconTypes[i] || force))
+			if (savedIconTypes[i] && (!Minimap.instance.m_visibleIconTypes[i] || force))
 			{
 				Minimap.instance.ToggleIconFilter((Minimap.PinType)i);
 			}
@@ -537,6 +563,19 @@ public static class Map
 	}
 
 	private static void AddPortalPins()
+	{
+		drivingIconFilters = true;
+		try
+		{
+			AddPortalPinsInner();
+		}
+		finally
+		{
+			drivingIconFilters = false;
+		}
+	}
+
+	private static void AddPortalPinsInner()
 	{
 		bool changedPins = false;
 		HashSet<Vector3> existingPins = new(activePins.Keys.Select(p => p.m_pos));
