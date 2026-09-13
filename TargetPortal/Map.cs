@@ -406,6 +406,26 @@ public static class Map
 		}
 	}
 
+	// The map's own buttons carry a UIGamePad, which fires them straight off the pad without knowing
+	// what mode the map is in. The public position toggle sits on JoyButtonY under one control layout
+	// and on JoyDPadLeft under the other, so the two buttons the portal picker defaults to were also
+	// flipping the position broadcast. Silence the whole large map for the same reason the pin
+	// bindings above are silenced, rather than looking for free buttons that do not exist.
+	[HarmonyPatch(typeof(UIGamePad), nameof(UIGamePad.ButtonPressed))]
+	private static class BlockMapButtonsWhileTeleporting
+	{
+		private static bool Prefix(UIGamePad __instance, ref bool __result)
+		{
+			if (!Teleporting || Minimap.instance == null || !__instance.transform.IsChildOf(Minimap.instance.m_largeRoot.transform))
+			{
+				return true;
+			}
+
+			__result = false;
+			return false;
+		}
+	}
+
 	[HarmonyPatch]
 	private class MapAlternativeClick
 	{
