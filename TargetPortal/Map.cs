@@ -24,6 +24,17 @@ public static class Map
 	private static readonly List<FavoriteEntry> favorites = new();
 	private static int favoriteCycleIndex = -1;
 	private static bool drivingIconFilters;
+	private static readonly List<PortalHintBar> portalHintBars = new();
+	private static TextMeshProUGUI? favoriteListHeader;
+
+	// One per vanilla gamepad hint bar: the vanilla "add pin" hint it stands in for while a portal
+	// is picked, and our two replacements.
+	private class PortalHintBar
+	{
+		public GameObject AddPinHint = null!;
+		public TextMeshProUGUI TeleportHint = null!;
+		public TextMeshProUGUI FavoriteHint = null!;
+	}
 
 	private class FavoriteEntry
 	{
@@ -72,6 +83,8 @@ public static class Map
 			{
 				AddPortalPins();
 			}
+
+			ShowPortalHints(true);
 
 			if (InventoryGui.IsVisible())
 			{
@@ -141,6 +154,7 @@ public static class Map
 		ClearFavoriteHighlight();
 
 		Teleporting = false;
+		ShowPortalHints(false);
 
 		if (!shouldPortalsBeVisible)
 		{
@@ -483,11 +497,116 @@ public static class Map
 			rect.sizeDelta = new Vector2(200, 500);
 			rect.pivot = new Vector2(0, 0.5f);
 			favoriteList.AddComponent<VerticalLayoutGroup>().childForceExpandHeight = false;
+
+			// The map shows one hint bar per input mode and UIInputHint switches between them, so the
+			// portal hints have to exist in both gamepad bars to follow whichever one is live. The
+			// teleport hint takes the add pin slot, since A does that instead while a portal is picked.
+			portalHintBars.Clear();
+			foreach (string group in new[] { "gamepad_hints", "gamepadmouse_hints" })
+			{
+				if (FindGamepadHintTemplate(group) is { } template)
+				{
+					TextMeshProUGUI teleport = CloneGamepadHint(template, template.parent, "Text - TargetPortalTeleport");
+					teleport.transform.SetSiblingIndex(template.GetSiblingIndex() + 1);
+					TextMeshProUGUI favorite = CloneGamepadHint(template, template.parent, "Text - TargetPortalFavorite");
+					teleport.gameObject.SetActive(false);
+					favorite.gameObject.SetActive(false);
+					portalHintBars.Add(new PortalHintBar { AddPinHint = template.gameObject, TeleportHint = teleport, FavoriteHint = favorite });
+				}
+			}
+		}
+	}
+
+	// Vanilla's gamepad hints are plain texts under a layout group: a glyph placeholder in a
+	// monospace span followed by the label. Cloning one keeps the font, outline and sizing in step
+	// with the bar they sit in.
+	private static Transform? FindGamepadHintTemplate(string group) => Minimap.instance.m_largeRoot.transform.Find($"KeyHints/{group}/Text - AddPin");
+
+	private static TextMeshProUGUI CloneGamepadHint(Transform template, Transform parent, string name)
+	{
+		GameObject hint = Object.Instantiate(template.gameObject, parent);
+		hint.name = name;
+		return hint.GetComponent<TextMeshProUGUI>();
+	}
+
+	// Localize re-renders every text it has a template for whenever the input layout changes, which
+	// is what swaps the glyphs between controller types. Registering ours in that cache gets the same
+	// treatment instead of a second refresh path.
+	private static void SetHintTemplate(TextMeshProUGUI hint, string template)
+	{
+		Localization.instance.textMeshStrings[hint] = template;
+		hint.text = Localization.instance.Localize(template);
+	}
+
+	private static void ForgetHintTemplate(TextMeshProUGUI? hint)
+	{
+		if (hint != null)
+		{
+			Localization.instance.RemoveTextFromCache(hint);
+		}
+	}
+
+	private static string GamepadHintText(string glyph, string label) => $"<mspace=0.6em>{glyph} </mspace>{label}";
+
+	private static void ShowPortalHints(bool show)
+	{
+		foreach (PortalHintBar bar in portalHintBars)
+		{
+			bar.AddPinHint.SetActive(!show);
+			ShowPortalHint(bar.TeleportHint, show, TargetPortal.gamepadTeleportButton.Value, "Teleport");
+			ShowPortalHint(bar.FavoriteHint, show, TargetPortal.gamepadFavoriteButton.Value, "Favorite");
+		}
+	}
+
+	private static void ShowPortalHint(TextMeshProUGUI hint, bool show, TargetPortal.GamepadButton button, string label)
+	{
+		// Read on every show so a rebinding in the config manager is picked up by the next portal.
+		string? glyph = TargetPortal.GamepadButtonHint(button);
+		if (show && glyph is not null)
+		{
+			SetHintTemplate(hint, GamepadHintText(glyph, label));
+		}
+		hint.gameObject.SetActive(show && glyph is not null);
+	}
+
+	// The vanilla bar follows the input device through UIInputHint; the header sits in our own list
+	// and has to follow it by hand. Only the active flag is touched, so this is cheap to poll.
+	[HarmonyPatch(typeof(Minimap), nameof(Minimap.Update))]
+	private static class SyncFavoriteListHeader
+	{
+		private static void Prefix()
+		{
+			if (favoriteListHeader != null && favoriteListHeader.gameObject.activeSelf != ZInput.IsGamepadActive())
+			{
+				favoriteListHeader.gameObject.SetActive(ZInput.IsGamepadActive());
+			}
+		}
+	}
+
+	// Localization.instance outlives the map, so the hint texts registered in its cache have to be
+	// taken out again when the map goes away.
+	[HarmonyPatch(typeof(Minimap), nameof(Minimap.OnDestroy))]
+	private static class ForgetHintTemplates
+	{
+		private static void Postfix()
+		{
+			foreach (PortalHintBar bar in portalHintBars)
+			{
+				ForgetHintTemplate(bar.TeleportHint);
+				ForgetHintTemplate(bar.FavoriteHint);
+			}
+			portalHintBars.Clear();
+			ForgetHintTemplate(favoriteListHeader);
+			favoriteListHeader = null;
 		}
 	}
 
 	private static void ClearFavorites()
 	{
+		// The header is destroyed with the rest of the list below.
+		ForgetHintTemplate(favoriteListHeader);
+		favoriteListHeader = null;
+
 		for (int i = 0; i < favoriteList.transform.childCount; ++i)
 		{
 			Object.Destroy(favoriteList.transform.GetChild(i).gameObject);
@@ -528,6 +647,24 @@ public static class Map
 				}
 			}
 		}
+
+		AddFavoriteListHeader();
+	}
+
+	// Tells a gamepad user which button walks the list, since the entries themselves cannot be
+	// selected with one. Shown only while a gamepad is active, which SyncFavoriteListHeader keeps up.
+	private static void AddFavoriteListHeader()
+	{
+		if (favorites.Count == 0 || TargetPortal.GamepadButtonHint(TargetPortal.gamepadCycleFavoritesButton.Value) is not { } glyph || FindGamepadHintTemplate("gamepad_hints") is not { } template)
+		{
+			return;
+		}
+
+		favoriteListHeader = CloneGamepadHint(template, favoriteList.transform, "Header");
+		favoriteListHeader.transform.SetAsFirstSibling();
+		favoriteListHeader.horizontalAlignment = HorizontalAlignmentOptions.Left;
+		SetHintTemplate(favoriteListHeader, glyph);
+		favoriteListHeader.gameObject.SetActive(ZInput.IsGamepadActive());
 	}
 
 	private class FavoriteClicked : MonoBehaviour, IPointerClickHandler

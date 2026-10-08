@@ -110,6 +110,11 @@ public class TargetPortal : BaseUnityPlugin
 		_ => null,
 	};
 
+	// The map's own gamepad hints spell their glyphs as $KEY_ButtonA placeholders, which Localization
+	// turns into the sprite for the connected controller by prefixing Joy and looking the binding up.
+	// Hand ours over in the same form so the same code renders them.
+	public static string? GamepadButtonHint(GamepadButton button) => GamepadButtonName(button) is { } name ? "$KEY_" + name.Substring("Joy".Length) : null;
+
 	public void Awake()
 	{
 		serverConfigLocked = config("1 - General", "Lock Configuration", Toggle.On, "If on, the configuration is locked and can be changed by server admins only.");
